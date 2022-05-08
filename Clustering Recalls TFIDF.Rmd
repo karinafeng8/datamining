@@ -1,0 +1,337 @@
+---
+title: "Final Project"
+author: "Julia Angkeow"
+date: "4/25/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(udpipe)
+library(plyr)
+library(dplyr)
+library(proxy)
+library(factoextra)
+library(glmnet)
+```
+
+```{r}
+recalls_original<- read.csv("new_recalls_updated.csv", header=T, stringsAsFactors = F)
+```
+
+```{r}
+udmodel<-udpipe_download_model(language="english")
+eng_model<- udpipe_load_model(file=udmodel$file_model)
+
+word_count <- function(tokens){
+  counts <- table(tokens)
+  return(as.data.frame(as.list(counts)))
+}
+
+recalls<-recalls_original[,c(3)]
+names(recalls)<- recalls_original$p_id
+recalls_df <- data.frame()
+recall_id<- c()
+
+for(i in seq_along(recalls)){
+ recalls_ex<- strsplit(recalls[i], ".", fixed=T) #separated into sentences
+ recalls_ex <- lapply(recalls_ex, tolower) #lowercased all of the words
+ recalls_ex<- unlist(recalls_ex)
+ udpipe_out <- udpipe_annotate(eng_model, x=  recalls_ex,
+                              tagger='default', parser='none')
+ lemm_df <- as.data.frame(udpipe_out)
+ word_counts <- lapply(lemm_df$lemma, word_count) #counted the occurrences of each lemmatized token within each letter 
+ df <- rbind.fill(word_counts) 
+ sums <- colSums(df, na.rm = T)
+ recalls_df <- bind_rows(recalls_df, sums)
+ recall_id<- append(recall_id, names(recalls[i]))
+}
+recalls_df<- cbind(recall_id, recalls_df)
+
+#write.csv(recalls_df, "recalls_lemmatized.csv", row.names=F)
+
+```
+
+```{r}
+recalls_376<- recalls_original
+recalls_df$story_id<- recalls_376$story_id
+recalls_df$prime_id<- recalls_df$prime_id
+
+recalls_no_id<- recalls_df[,!(colnames(recalls_df) %in% c("recall_id", "story_id", "prime_id"))]
+dim(recalls_no_id) #376 by 2556 tokens
+
+vec<- colSums(recalls_no_id>0, na.rm=T)
+
+percentages<- data.frame(vec/376)
+
+jpeg("dist_lemm.jpeg", width=6, height=4, res=300, units="in")
+hist(sqrt(percentages$vec.376), xlab="sqrt(Frequency of token in recalls)", ylab="Number of tokens")
+dev.off()
+
+length(percentages[percentages$vec.376<0.1,]) 
+
+```
+
+```{r}
+library(stringr)
+recall_lengths<- str_count(recalls_376$recall, '\\s+')+1
+names(recall_lengths)<- recalls_376$p_id
+
+jpeg("dist_words.jpeg", width=6, height=4, res=300, units="in")
+hist(recall_lengths, main="Distribution of number of words in recalls", xlab="Number of words", ylab="Number of recalls") 
+dev.off()
+
+mean(recall_lengths)
+median(recall_lengths)
+quantile(recall_lengths)
+```
+
+I noticed that the distribution of the number of words was skewed to the right. 
+
+I noticed that the lengths of people's recalls varied drastically. 
+
+```{r}
+recalls_no_id[is.na(recalls_no_id)]<- 0
+recalls_no_id$lengths<- recall_lengths
+
+tf<- lapply(recalls_no_id, "/", recalls_no_id$lengths) #calculated TF as # count of term in the recall divided by the number of words in the recall
+tf<- bind_rows(tf)
+tf<- tf[,colnames(tf)!="lengths"] #removed the lengths column
+
+#IDF = log (N/nt) where N is the number of recalls and nt is the number of recalls that contain the term t
+# All terms are important, but scaling down frequent words that have minimal importance such as "the". 
+
+N <- nrow(recalls_no_id) 
+nt <- apply(recalls_no_id,2,function(x) sum(x != 0))  
+idf <- log(N/nt)
+idf <- matrix(rep(idf,N), byrow=T, nrow=N)
+tfidf<- tf*idf #tfidf original
+
+
+mtfidf<- data.frame(apply(tfidf,2, function(x) max(x)))
+colnames(mtfidf)<- "max TF-IDF" #found the max TFIDF 
+
+library(stopwords) #using stopwords to reduce dimensionality of the data
+all_words<- stopwords("en") 
+
+words_mtfidf<- row.names(mtfidf)
+overlapping<- words_mtfidf[words_mtfidf %in% all_words] 
+length(overlapping) #tokens that are in the stopwords package
+
+overlapping_mtfidf<- subset(mtfidf, row.names(mtfidf) %in% overlapping)
+head(overlapping_mtfidf[order(overlapping_mtfidf$`max TF-IDF`, decreasing=T),, drop=F],1) #its is the most frequently used stop word.
+```
+```{r}
+#jpeg("dist_max_tfidf.jpeg", width=6, height=4, res=300, units="in")
+hist(mtfidf$`max TF-IDF`, main="Distribution of maximum TF-IDF values across all recalls", xlab="Maximum TF-IDF value across all recalls", ylab="Number of lemmatizations")
+abline(v=max(overlapping_mtfidf$`max TF-IDF`), col="red")
+abline(v=median(overlapping_mtfidf$`max TF-IDF`), col="blue")
+#dev.off()
+```
+
+```{r}
+length(overlapping) #88 tokens overlapping with stopwords package
+
+length(mtfidf[mtfidf$`max TF-IDF`<= max(overlapping_mtfidf$`max TF-IDF`),]) #gets rid of 2548 tokens
+
+length(mtfidf[mtfidf$`max TF-IDF`<= mean(overlapping_mtfidf$`max TF-IDF`),]) #gets rid of 1986 tokens
+
+length(mtfidf[mtfidf$`max TF-IDF`<= median(overlapping_mtfidf$`max TF-IDF`),]) #gets rid of 1587 tokens
+
+#Since data is skewed to the right, use median.
+
+median(overlapping_mtfidf$`max TF-IDF`)
+```
+
+```{r}
+stopwords_median<- row.names(mtfidf[mtfidf$`max TF-IDF`<= median(overlapping_mtfidf$`max TF-IDF`),,drop=F]) #subsetting all tokens that have max MTIDFs less than the median max TFIDF across all tokens
+
+#Removing all tokens that are less than the median max TFIDF across all tokens and all tokens in stopwords package
+
+length(overlapping) #88 tokens in stopwords
+length(stopwords_median) #1587 tokens in stopwords median
+length(unique(c(overlapping, stopwords_median))) #1631 words removed total
+ncol(tfidf)-length(unique(c(overlapping, stopwords_median))) #925 words left
+
+chosen_words<- mtfidf[!(row.names(mtfidf) %in% c(overlapping, stopwords_median)),,drop=F]
+dim(chosen_words)
+```
+
+```{r}
+chosen_tfidf<- tfidf[,colnames(tfidf) %in% row.names(chosen_words)]
+chosen_tfidf_mat<- as.matrix(chosen_tfidf)
+
+story_ids<- as.data.frame(recalls_376$story_id)
+colnames(story_ids)<- "story_id"
+
+```
+
+
+```{r}
+prime_ids<- as.data.frame(recalls_376$prime_id)
+colnames(prime_ids)<- "prime_id"
+```
+
+# Clustering by Story IDs
+
+First, I performed LASSO on the story IDs. 
+
+```{r}
+set.seed(25)
+best_features<- c()
+lasso_coefs<- c()
+for(i in unlist(unique(story_ids$story_id))){
+df<- story_ids %>% mutate(story_id=ifelse(story_id==i, 1, 0)) # 1 vs. all method
+lasso.cv<- cv.glmnet(chosen_tfidf_mat, df$story_id, lambda=10^seq(-5,0, length.out=50), alpha=1)
+#plot(lasso.cv)
+#abline(v=log(lasso.cv$lambda.1se))
+
+k <- which(lasso.cv$lambda == lasso.cv$lambda.1se)
+coefs <- lasso.cv$glmnet.fit$beta[, k]
+coefs_top <- sort(coefs, decreasing = TRUE)
+features<- names(coefs_top[coefs_top > 0]) # chose the most important features with positive coefficients
+values<- coefs_top[coefs_top > 0]
+best_features <- c(best_features, features)
+lasso_coefs<- c(lasso_coefs, values)
+}
+
+features_coefs<- as.data.frame(cbind(best_features, lasso_coefs)) 
+features_tfidf<- tfidf[,colnames(tfidf) %in% features_coefs$best_features]
+```
+
+
+```{r}
+#sample(best_features, 2)
+
+ex<- data.frame(cbind(features_tfidf$scorpion, features_tfidf$vacation, story_ids))
+colnames(ex)<- c("scorpion", "vacation", "id")
+
+library(ggplot2)
+
+#jpeg("dist_max_tfidf.jpeg", width=7, height=5, res=300, units="in")
+ggplot(ex, aes(x=scorpion, y=vacation, color=as.factor(id)))+ geom_point() + guides(color=guide_legend(title="Story ID"))
+#dev.off()             
+
+```
+
+```{r}
+ex<- data.frame(cbind(features_tfidf$leon, features_tfidf$sadie, story_ids))
+colnames(ex)<- c("leon", "sadie", "id")
+
+#jpeg("dist_max_tfidf.jpeg", width=7, height=5, res=300, units="in")
+ggplot(ex, aes(x=leon, y=sadie, color=as.factor(id)))+ geom_point() + guides(color=guide_legend(title="Story ID"))
+#dev.off()
+```
+
+```{r}
+mtfidf$best_features<- row.names(mtfidf)
+all_coefs<-merge(features_coefs, mtfidf, by="best_features")
+
+top_words<- head(all_coefs[order(all_coefs$`max TF-IDF`, decreasing=T),],30)
+
+top_tfidf<- features_tfidf[,colnames(features_tfidf) %in% top_words$best_features]
+
+top_tfidf_mat<- as.matrix(top_tfidf)
+```
+
+```{r}
+set.seed(331) #performing ordinary K-means to figure out how many clusters to look at
+kmax<-20
+out<- matrix(NA, ncol=2, nrow=kmax)
+for(k in seq_len(kmax)){
+  clust<- kmeans(top_tfidf_mat, centers=k+1, iter.max=30)
+  out[k,1]<-clust$betweenss #signal
+  out[k,2]<- clust$tot.withinss #noise 
+}
+
+par(mfrow=c(1,2))
+
+#jpeg("clusters.jpeg", width=5, height=7, res=300, units="in")
+plot(out[,1]/out[,2])
+#dev.off()
+
+```
+
+
+```{r, echo=T, eval=F}
+dist_mat <- dist(top_tfidf_mat)
+
+jpeg("hier_clust.jpeg", width=6, height=4, res=300, units="in")
+h_out <- hclust(dist_mat, method = "ward.D")
+plot(h_out)
+dev.off()
+```
+
+```{r, echo=T, eval=F}
+clus_assignments<-cutree(h_out,k=10)
+clus_recalls<- data.frame(cbind(story_ids, prime_ids, cluster=clus_assignments))
+table(clus_recalls$cluster)
+table(clus_recalls$story_id)
+table(clus_recalls$prime_id)
+```
+
+# Analysis of Story Clusters 
+
+```{r, echo=T, eval=F}
+num_recalls<- data.frame(table(clus_recalls$cluster))
+
+jpeg("barplot.jpeg", width=6, height=4, res=300, units="in")
+ggplot(data=num_recalls, aes(x=Var1, y=Freq)) + geom_bar(stat="identity") + labs(x="Cluster", y="Number of Recalls in Cluster") 
+dev.off()
+
+num_recalls_per_story<- data.frame(table(clus_recalls$story_id))
+jpeg("barplot.jpeg", width=6, height=4, res=300, units="in")
+ggplot(data=num_recalls_per_story, aes(x=Var1, y=Freq)) + geom_bar(stat="identity") + labs(x="Story ID", y="Number of Recalls per Story ID")
+dev.off()
+
+jpeg("story_per_cluster.jpeg", width=6, height=4, res=300, units="in")
+ggplot(clus_recalls, aes(x=as.factor(cluster), y=as.factor(story_id))) + geom_point() + labs(x="Cluster", y="Story ID in Cluster")
+dev.off()
+```
+
+
+```{r, echo=T, eval=F}
+clus_recalls2<- clus_recalls[!(clus_recalls$cluster %in% c(1,2,3)),]
+num_recalls_specific<- data.frame(table(clus_recalls2$cluster))
+
+colnames(num_recalls_specific)<- c("cluster", "num_recalls")
+
+clus_story_ids<- unique(clus_recalls2$story_id)
+num_story_ids<- num_recalls_per_story[(num_recalls_per_story$Var1 %in% clus_story_ids), ]
+```
+
+```{r, echo=T, eval=F}
+clus_recall3<- clus_recalls2[!duplicated(clus_recalls2$story_id),]
+
+colnames(num_story_ids)<- c("story_id", "num_recalls_per_story")
+
+merged_df<- merge(clus_recall3, num_story_ids, by="story_id")
+
+merged_df<- merge(merged_df, num_recalls_specific, by="cluster")
+
+merged_df$proportion<- merged_df$num_recalls/  merged_df$num_recalls_per_story
+```
+
+```{r, echo=T, eval=F}
+jpeg("barplot.jpeg", width=6, height=4, res=300, units="in")
+
+ggplot(data=merged_df , aes(x=as.factor(cluster), y=proportion, fill=as.factor(story_id))) + geom_bar(stat="identity") + labs(x="Cluster", y="Proportion of Recalls in Cluster") + guides(fill=guide_legend(title="Story ID"))
+
+dev.off()
+```
+
+
+```{r, echo=T, eval=F}
+clus_assign<- data.frame(cbind(top_tfidf_mat, cluster=clus_assignments))
+
+for (i in 1:10) {
+    mc_tfidf <- apply(clus_assign[clus_assignments == i, -31], 2, max)
+    top_words <- tail(sort(mc_tfidf), 5)
+    print(paste("Top words in cluster", i))
+    print(names(top_words))    
+}
+```
+

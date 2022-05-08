@@ -1,0 +1,170 @@
+---
+title: "Clustering Stories TFIDF"
+author: "Julia Angkeow"
+date: "5/7/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(udpipe)
+library(plyr)
+library(dplyr)
+library(proxy)
+library(factoextra)
+```
+
+Clustering the stories to see if separable by TF IDF
+
+```{r}
+original_stories<- read.csv("original_stories.csv", header=T, stringsAsFactors=F)
+```
+
+```{r}
+udmodel<-udpipe_download_model(language="english")
+eng_model<- udpipe_load_model(file=udmodel$file_model)
+
+word_count <- function(tokens){
+  counts <- table(tokens)
+  return(as.data.frame(as.list(counts)))
+}
+
+original<-original_stories[,c(2)]
+names(original)<- original_stories$story_id
+original_df <- data.frame()
+original_id<- c()
+
+for(i in seq_along(original)){
+ original_ex<- strsplit(original[i], ".", fixed=T) #separated into sentences
+ original_ex <- lapply(original_ex, tolower) #lowercased all of the words
+ original_ex<- unlist(original_ex)
+ udpipe_out <- udpipe_annotate(eng_model, x=  original_ex,
+                              tagger='default', parser='none')
+ lemm_df <- as.data.frame(udpipe_out)
+ word_counts <- lapply(lemm_df$lemma, word_count) #counted the occurrences of each lemmatized token within each letter 
+ df <- rbind.fill(word_counts) 
+ sums <- colSums(df, na.rm = T)
+ original_df <- bind_rows(original_df, sums)
+ original_id<- append(original_id, names(original[i]))
+}
+original_df<- cbind(original_id, original_df)
+
+
+```
+
+```{r}
+vec<- colSums(original_df[,-1]>0, na.rm=T)
+
+percentages<- data.frame(vec/16)
+
+jpeg("dist_lemm.jpeg", width=6, height=4, res=300, units="in")
+hist(percentages$vec.16, xlab="Frequency of token in original stories", ylab="Number of tokens")
+dev.off()
+
+length(percentages[percentages$vec.16<0.1,]) 
+```
+
+```{r}
+library(stringr)
+original_lengths<- str_count(original_stories$story_text, '\\s+')+1
+
+jpeg("dist_words.jpeg", width=6, height=4, res=300, units="in")
+hist(original_lengths, main="Distribution of number of words in original stories", xlab="Number of words", ylab="Number of stories") 
+dev.off()
+
+mean(original_lengths)
+median(original_lengths)
+quantile(original_lengths)
+```
+
+```{r}
+original_no_id<- original_df [,-1]
+original_no_id[is.na(original_no_id)]<- 0
+original_no_id$lengths<- original_lengths
+
+tf<- lapply(original_no_id, "/", original_no_id$lengths) #calculated TF as # count of term in the recall divided by the number of words in the recall
+tf<- bind_rows(tf)
+tf<- tf[,colnames(tf)!="lengths"] #removed the lengths column
+
+#IDF = log (N/nt) where N is the number of original and nt is the number of original that contain the term t
+# All terms are important, but scaling down frequent words that have minimal importance such as "the". 
+
+N <- nrow(original_no_id) 
+nt <- apply(original_no_id,2,function(x) sum(x != 0))  
+idf <- log(N/nt)
+idf <- matrix(rep(idf,N), byrow=T, nrow=N)
+tfidf<- tf*idf #tfidf original
+```
+
+```{r}
+
+mtfidf<- data.frame(apply(tfidf,2, function(x) max(x)))
+colnames(mtfidf)<- "max TF-IDF" #found the max TFIDF 
+
+library(stopwords) #using stopwords to reduce dimensionality of the data
+all_words<- stopwords("en") 
+
+words_mtfidf<- row.names(mtfidf)
+overlapping<- words_mtfidf[words_mtfidf %in% all_words] 
+length(overlapping) #tokens that are in the stopwords package
+
+overlapping_mtfidf<- subset(mtfidf, row.names(mtfidf) %in% overlapping)
+head(overlapping_mtfidf[order(overlapping_mtfidf$`max TF-IDF`, decreasing=T),, drop=F],1) #once is the most frequently used stop word.
+```
+
+```{r}
+jpeg("dist_max_tfidf.jpeg", width=6, height=4, res=300, units="in")
+hist(mtfidf$`max TF-IDF`, main="Distribution of maximum TF-IDF values across all stories", xlab="Maximum TF-IDF value across all stories", ylab="Number of lemmatizations")
+abline(v=max(overlapping_mtfidf$`max TF-IDF`), col="red")
+dev.off()
+```
+
+```{r}
+length(overlapping) #84 tokens overlapping with stopwords package
+
+length(mtfidf[mtfidf$`max TF-IDF`<= max(overlapping_mtfidf$`max TF-IDF`),]) #gets rid of 1622 tokens
+
+```
+
+```{r}
+kept_tokens<- head(mtfidf[mtfidf$`max TF-IDF`> max(overlapping_mtfidf$`max TF-IDF`),,drop=F],50)
+
+```
+
+```{r}
+tokens_tfidf<- tfidf[,colnames(tfidf) %in% row.names(kept_tokens)]
+row.names(tokens_tfidf)<- original_stories$story_id
+tokens_tfidf_mat<- as.matrix(tokens_tfidf)
+```
+
+```{r}
+dist_mat <- dist(tokens_tfidf_mat)
+
+jpeg("hier_clust.jpeg", width=6, height=4, res=300, units="in")
+h_out <- hclust(dist_mat, method = "ward.D")
+plot(h_out)
+dev.off()
+```
+```{r}
+h_clust <- cutree(h_out, h=0.02)
+clus_stories<- data.frame(cbind(original_stories$story_id, cluster=h_clust))
+specific_clusters<- clus_stories[clus_stories$cluster==11 | clus_stories$cluster==12,]
+colnames(specific_clusters)[1]<- "story_id"
+specific_clusters[order(specific_clusters$cluster, decreasing=F),]
+```
+
+```{r}
+clus_assign<- data.frame(cbind(tokens_tfidf_mat, cluster=h_clust))
+
+for (i in c(11,12)) {
+    mc_tfidf <- apply(clus_assign[clus_assign$cluster == i, -51], 2, max)
+    top_words <- tail(sort(mc_tfidf), 5)
+    print(paste("Top words in cluster", i))
+    print(names(top_words))    
+}
+```
+
+
